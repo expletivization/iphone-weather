@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Weather</title>
+
+  <!-- PWA / Safari webapp -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Weather">
+  <meta name="theme-color" content="#07101f">
+  <meta name="mobile-web-app-capable" content="yes">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@100;200;300;400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #07101f;
+      --card:      rgba(255,255,255,0.07);
+      --border:    rgba(255,255,255,0.09);
+      --text:      #ffffff;
+      --muted:     rgba(255,255,255,0.32);
+      --dimmer:    rgba(255,255,255,0.18);
+      --gap:       8px;
+      --radius:    16px;
+    }
+
+    html {
+      height: 100%;
+      /* Prevent bounce scroll showing bg color */
+      background: var(--bg);
+    }
+
+    body {
+      min-height: 100%;
+      /* Use dvh so the grid fills exactly the visible viewport on iOS */
+      height: 100dvh;
+      overflow: hidden;
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      /* Safe area insets for notch / Dynamic Island */
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      padding-right: env(safe-area-inset-right);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    /* Atmospheric glow */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background:
+        radial-gradient(ellipse 80% 50% at 20% 10%, rgba(30,100,210,0.20) 0%, transparent 70%),
+        radial-gradient(ellipse 60% 60% at 80% 80%, rgba(15,70,160,0.15) 0%, transparent 65%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── 3×3 grid filling the full viewport ─────────────── */
+    .dashboard {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      /* Outdoor hero is taller — 2 rows of 3 cols, hero spans col 1-2 rows 1-2 */
+      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-rows: repeat(3, 1fr);
+      gap: var(--gap);
+      padding: var(--gap);
+      height: 100%;
+      opacity: 0;
+      transition: opacity 0.6s ease;
+    }
+    .dashboard.loaded { opacity: 1; }
+
+    /* ── Glass card base ────────────────────────────────── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 11px 12px;
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: background 0.15s ease;
+    }
+    .card:active { background: rgba(255,255,255,0.12); }
+
+    /* Top shimmer */
+    .card::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 10%; right: 10%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.16), transparent);
+    }
+
+    /* ── Colour variants ────────────────────────────────── */
+    .card-outdoor { background: rgba(30,100,220,0.18); border-color: rgba(100,165,255,0.20); }
+    .card-wind    { background: rgba(80,210,170,0.09); border-color: rgba(80,210,170,0.18); }
+    .card-rain    { background: rgba(70,145,255,0.11); border-color: rgba(70,145,255,0.22); }
+    .card-uv      { background: rgba(255,200,55,0.08); border-color: rgba(255,200,55,0.18); }
+    .card-soil    { background: rgba(100,190,90,0.09); border-color: rgba(100,190,90,0.22); }
+
+    /* ── Grid placement ─────────────────────────────────── */
+    /* Row 1: Outdoor (wide, 2 cols) | Wind | Rain         */
+    /* Row 2: Outdoor (cont.)        | Pressure | UV       */
+    /* Row 3: Barn | Soil | Updated                        */
+
+    .card-outdoor  { grid-column: 1 / 3; grid-row: 1 / 3; }
+    .card-wind     { grid-column: 3; grid-row: 1; }
+    .card-rain     { grid-column: 3; grid-row: 2; }
+    .card-barn     { grid-column: 1; grid-row: 3; }
+    .card-pressure { grid-column: 2; grid-row: 3; }
+    .card-soil     { grid-column: 3; grid-row: 3; }
+
+    /* ── UV gets a full row 2 span when we have 6 cells ── */
+    /* Layout: row1: outdoor(2) wind | row2: outdoor(2) rain | row3: barn pressure soil */
+    /* Replacing UV — it moves into a footer strip */
+
+    /* ── Labels ─────────────────────────────────────────── */
+    .card-label {
+      font-size: 8.5px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 4px;
+      flex-shrink: 0;
+    }
+
+    .spacer { flex: 1; min-height: 0; }
+
+    /* ── OUTDOOR HERO ───────────────────────────────────── */
+    .hero-temp {
+      font-size: clamp(64px, 16vw, 82px);
+      font-weight: 100;
+      letter-spacing: -5px;
+      line-height: 0.92;
+    }
+    .hero-deg {
+      font-size: clamp(28px, 7vw, 36px);
+      font-weight: 200;
+      letter-spacing: -1px;
+      vertical-align: 20px;
+    }
+    .hero-feels {
+      font-size: 10.5px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    .hero-stats { display: flex; flex-direction: column; gap: 4px; }
+    .stat-row   { display: flex; justify-content: space-between; align-items: center; }
+    .stat-label { font-size: 10px; color: var(--muted); }
+    .stat-val   { font-size: 12px; color: rgba(255,255,255,0.88); font-weight: 500; }
+
+    .hum-track {
+      height: 2.5px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 2px;
+      margin-top: 3px;
+      overflow: hidden;
+    }
+    .hum-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #4a9eff, #62d4ff);
+      border-radius: 2px;
+      transition: width 1.2s cubic-bezier(0.4,0,0.2,1);
+    }
+
+    .hero-updated {
+      margin-top: 8px;
+      font-size: 8px;
+      letter-spacing: 0.07em;
+      color: rgba(255,255,255,0.18);
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    /* ── Small card values ──────────────────────────────── */
+    .big-val {
+      font-size: clamp(30px, 8vw, 42px);
+      font-weight: 100;
+      letter-spacing: -2px;
+      line-height: 1;
+      margin-top: 2px;
+    }
+    .big-val .unit {
+      font-size: 12px;
+      font-weight: 400;
+      color: var(--muted);
+      letter-spacing: 0;
+    }
+
+    .foot-rows { display: flex; flex-direction: column; gap: 3px; }
+    .foot-row  { display: flex; justify-content: space-between; align-items: baseline; }
+    .foot-key  { font-size: 9.5px; color: var(--muted); }
+    .foot-val  { font-size: 11px; color: rgba(255,255,255,0.80); font-weight: 500; }
+
+    /* ── Wind compass (compact) ─────────────────────────── */
+    .wind-row { display: flex; align-items: center; gap: 7px; margin-top: 2px; }
+    .compass {
+      width: 34px; height: 34px;
+      border-radius: 50%;
+      border: 1px solid rgba(80,210,170,0.30);
+      position: relative;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .compass-arrow {
+      width: 2px; height: 12px;
+      background: linear-gradient(180deg, #64dcb4 0%, rgba(100,220,180,0.1) 100%);
+      border-radius: 2px;
+      transform-origin: center;
+      position: absolute;
+    }
+    .compass-dot { width: 3px; height: 3px; border-radius: 50%; background: rgba(255,255,255,0.2); }
+    .wind-dir-badge { font-size: 11px; font-weight: 600; color: #64dcb4; }
+
+    /* ── Gradient bars (UV / soil) ──────────────────────── */
+    .grad-track {
+      height: 3px;
+      border-radius: 2px;
+      position: relative;
+      margin-top: 5px;
+    }
+    .grad-track.uv-colors {
+      background: linear-gradient(90deg, #4caf50 0%, #ffeb3b 30%, #ff9800 60%, #f44336 80%, #9c27b0 100%);
+    }
+    .grad-track.soil-colors {
+      background: linear-gradient(90deg, #4fc3f7 0%, #81c784 35%, #aed581 55%, #ffb74d 75%, #ef5350 100%);
+    }
+    .grad-dot {
+      width: 8px; height: 8px;
+      background: #fff;
+      border-radius: 50%;
+      position: absolute;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+      transition: left 1s ease;
+    }
+
+    /* ── Pulse / status dot ─────────────────────────────── */
+    .pulse-dot {
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: #4a9eff;
+      position: absolute;
+      bottom: 10px; right: 11px;
+      transition: background 0.6s ease;
+    }
+    @keyframes breathe {
+      0%,100% { opacity: 0.35; transform: scale(1); }
+      50%      { opacity: 1;    transform: scale(1.5); }
+    }
+    .pulse-dot { animation: breathe 2.5s ease-in-out infinite; }
+
+    /* ── Tap hint strip ─────────────────────────────────── */
+    .tap-hint {
+      position: fixed;
+      bottom: calc(env(safe-area-inset-bottom) + 4px);
+      left: 0; right: 0;
+      text-align: center;
+      font-size: 9px;
+      letter-spacing: 0.10em;
+      color: rgba(255,255,255,0.14);
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    /* ── Loading overlay ────────────────────────────────── */
+    #loadingOverlay {
+      position: fixed; inset: 0; z-index: 50;
+      background: var(--bg);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 12px;
+      transition: opacity 0.5s ease;
+    }
+    #loadingOverlay.gone { opacity: 0; pointer-events: none; }
+    .spinner {
+      width: 26px; height: 26px;
+      border: 2px solid rgba(255,255,255,0.08);
+      border-top-color: #4a9eff;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-msg { font-size: 11px; color: var(--muted); letter-spacing: 0.10em; }
+  </style>
+</head>
+<body>
+
+<!-- Tap anywhere → Ecowitt graphs -->
+<div id="loadingOverlay">
+  <div class="spinner"></div>
+  <div class="loading-msg">Connecting…</div>
+</div>
+
+<div class="dashboard" id="dashboard">
+
+  <!-- ── OUTDOOR HERO (2×2) ── -->
+  <div class="card card-outdoor">
+    <div class="card-label">Outdoor</div>
+    <div class="hero-temp" id="outTemp">--<span class="hero-deg">°</span></div>
+    <div class="hero-feels" id="outFeels"></div>
+    <div class="spacer"></div>
+    <div class="hero-stats">
+      <div class="stat-row">
+        <span class="stat-label">Humidity</span>
+        <span class="stat-val" id="outHum">--%</span>
+      </div>
+      <div class="hum-track"><div class="hum-fill" id="humFill" style="width:0%"></div></div>
+      <div style="margin-top:3px"></div>
+      <div class="stat-row">
+        <span class="stat-label">Dew Point</span>
+        <span class="stat-val" id="outDew">--°F</span>
+      </div>
+    </div>
+    <div class="hero-updated" id="updatedAt">—</div>
+  </div>
+
+  <!-- ── WIND ── -->
+  <div class="card card-wind">
+    <div class="card-label">Wind</div>
+    <div class="wind-row">
+      <div class="compass">
+        <div class="compass-arrow" id="windArrow"></div>
+        <div class="compass-dot"></div>
+      </div>
+      <div>
+        <div style="font-size:11px;font-weight:600;color:#64dcb4" id="windDir">--</div>
+        <div class="big-val" id="windSpeed" style="font-size:clamp(22px,6vw,30px);letter-spacing:-1px">--<span class="unit"> mph</span></div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="foot-rows">
+      <div class="foot-row">
+        <span class="foot-key">Gust</span>
+        <span class="foot-val" id="windGust">--</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── RAIN ── -->
+  <div class="card card-rain">
+    <div class="card-label">Rain</div>
+    <div class="big-val" id="rainDaily">--<span class="unit"> in</span></div>
+    <div style="font-size:8.5px;color:var(--muted);margin-top:2px">today</div>
+    <div class="spacer"></div>
+    <div class="foot-rows">
+      <div class="foot-row">
+        <span class="foot-key">Rate</span>
+        <span class="foot-val" id="rainRate">--</span>
+      </div>
+      <div class="foot-row">
+        <span class="foot-key">Week</span>
+        <span class="foot-val" id="rainWeekly">--</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── BARN ── -->
+  <div class="card card-barn">
+    <div class="card-label">Barn</div>
+    <div class="big-val" id="inTemp">--<span class="unit">°</span></div>
+    <div class="spacer"></div>
+    <div class="foot-rows">
+      <div class="foot-row">
+        <span class="foot-key">Hum</span>
+        <span class="foot-val" id="inHum">--%</span>
+      </div>
+      <div class="foot-row">
+        <span class="foot-key">Pres</span>
+        <span class="foot-val" id="pressRel">--</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SOLAR / UV ── -->
+  <div class="card card-pressure" style="background:rgba(255,200,55,0.08);border-color:rgba(255,200,55,0.18)">
+    <div class="card-label">Solar &amp; UV</div>
+    <div class="big-val" id="solar" style="font-size:clamp(22px,6vw,30px);letter-spacing:-1px">--<span class="unit"> W/m²</span></div>
+    <div class="spacer"></div>
+    <div class="foot-rows">
+      <div class="foot-row">
+        <span class="foot-key">UV Index</span>
+        <span class="foot-val" id="uvi" style="font-weight:600">--</span>
+      </div>
+      <div class="grad-track uv-colors">
+        <div class="grad-dot" id="uvDot" style="left:0%"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SOIL TEMP ── -->
+  <div class="card card-soil">
+    <div class="card-label">Soil</div>
+    <div class="big-val" id="soilTemp" style="font-size:clamp(22px,6vw,30px);letter-spacing:-1px">--<span class="unit">°F</span></div>
+    <div class="spacer"></div>
+    <div class="foot-rows">
+      <div class="foot-row">
+        <span class="foot-key">Condition</span>
+        <span class="foot-val" id="soilZone" style="font-weight:600">--</span>
+      </div>
+      <div class="grad-track soil-colors">
+        <div class="grad-dot" id="soilDot" style="left:0%"></div>
+      </div>
+    </div>
+    <div class="pulse-dot" id="pulseDot"></div>
+  </div>
+
+</div>
+
+<div class="tap-hint">TAP ANYWHERE FOR GRAPHS</div>
+
+<script>
+  const ECOWITT_URL = 'https://www.ecowitt.net/home/share?authorize=3244ES&device_id=ZVRZcStuWWx2QUxyN1dkeEVIbExNdz09';
+  const API_KEY  = '8c58870e-bbfd-405f-b785-ec7ed5663582';
+  const APP_KEY  = '11C8F21FCADE94BCE4B1CF1A04A72BAC';
+  const MAC      = '88:57:21:1D:4C:6B';
+  const INTERVAL = 60_000;
+
+  // Tap anywhere → Ecowitt graphs
+  document.body.addEventListener('click', () => {
+    window.open(ECOWITT_URL, '_blank');
+  });
+
+  // ── Helpers ─────────────────────────────────────────────
+  function gv(group, key, dec = 1) {
+    const v = parseFloat(group?.[key]?.value);
+    return isNaN(v) ? null : +v.toFixed(dec);
+  }
+  function setText(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+  function setHTML(id, html) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = html;
+  }
+  function degToCardinal(deg) {
+    const d = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+    return d[Math.round(deg / 22.5) % 16];
+  }
+  function uvColor(uvi) {
+    if (uvi <= 2) return '#4caf50';
+    if (uvi <= 5) return '#f9c22e';
+    if (uvi <= 7) return '#ff9800';
+    if (uvi <= 10) return '#f44336';
+    return '#9c27b0';
+  }
+  function soilZoneInfo(f) {
+    if (f < 40) return { label: 'Dormant', color: '#4fc3f7', pct: Math.max(0, (f / 40) * 15) };
+    if (f < 50) return { label: 'Cold',    color: '#81c784', pct: 15 + ((f - 40) / 10) * 15 };
+    if (f < 65) return { label: 'Cool',    color: '#aed581', pct: 30 + ((f - 50) / 15) * 20 };
+    if (f < 80) return { label: 'Ideal',   color: '#66bb6a', pct: 50 + ((f - 65) / 15) * 25 };
+    if (f < 95) return { label: 'Warm',    color: '#ffb74d', pct: 75 + ((f - 80) / 15) * 15 };
+    return             { label: 'Hot',     color: '#ef5350', pct: 100 };
+  }
+
+  // ── Main fetch ──────────────────────────────────────────
+  async function fetchWeather() {
+    const params = new URLSearchParams({
+      application_key: APP_KEY,
+      api_key: API_KEY,
+      mac: MAC,
+      call_back: 'outdoor,indoor,wind,rainfall,rainfall_piezo,pressure,solar_and_uvi',
+      temp_unitid: '2',
+      pressure_unitid: '4',
+      wind_speed_unitid: '9',
+      rainfall_unitid: '12',
+      solar_irradiance_unitid: '16'
+    });
+
+    try {
+      const res  = await fetch(`https://api.ecowitt.net/api/v3/device/real_time?${params}`);
+      const json = await res.json();
+      if (json.code !== 0) throw new Error(json.msg ?? 'API error');
+      const d = json.data;
+
+      // Outdoor
+      const outT = gv(d.outdoor, 'temperature');
+      setHTML('outTemp', outT != null ? `${outT}<span class="hero-deg">°</span>` : '--<span class="hero-deg">°</span>');
+
+      const feels = gv(d.outdoor, 'feels_like') ?? gv(d.outdoor, 'app_temp');
+      const feelsEl = document.getElementById('outFeels');
+      const feelsDiffers = feels != null && outT != null && Math.abs(feels - outT) >= 1;
+      feelsEl.textContent = feelsDiffers ? `Feels like ${feels}°F` : '';
+
+      const hum = gv(d.outdoor, 'humidity', 0);
+      setText('outHum', hum != null ? `${hum}%` : '--%');
+      document.getElementById('humFill').style.width = hum != null ? `${hum}%` : '0%';
+
+      const dew = gv(d.outdoor, 'dew_point');
+      setText('outDew', dew != null ? `${dew}°F` : '--°F');
+
+      // Indoor (Barn)
+      const inT = gv(d.indoor, 'temperature');
+      setHTML('inTemp', inT != null ? `${inT}<span class="unit">°</span>` : '--');
+      const inH = gv(d.indoor, 'humidity', 0);
+      setText('inHum', inH != null ? `${inH}%` : '--%');
+
+      // Pressure (shown in barn card)
+      const pr = gv(d.pressure, 'relative', 2);
+      setText('pressRel', pr != null ? `${pr}"` : '--');
+
+      // Wind
+      const ws = gv(d.wind, 'wind_speed');
+      setHTML('windSpeed', ws != null ? `${ws}<span class="unit"> mph</span>` : '--');
+      const wd = gv(d.wind, 'wind_direction', 0);
+      if (wd != null) {
+        setText('windDir', degToCardinal(wd));
+        document.getElementById('windArrow').style.transform = `rotate(${wd + 180}deg)`;
+      }
+      const wg = gv(d.wind, 'wind_gust');
+      setText('windGust', wg != null ? `${wg} mph` : '--');
+
+      // Rain
+      const rain = (Object.keys(d.rainfall_piezo ?? {}).length ? d.rainfall_piezo : null)
+                ?? (Object.keys(d.rainfall ?? {}).length ? d.rainfall : null)
+                ?? {};
+      const mmToIn = v => v != null ? +(v / 25.4).toFixed(2) : null;
+      const rd = mmToIn(gv(rain, 'daily', 4));
+      setHTML('rainDaily', rd != null ? `${rd}<span class="unit"> in</span>` : `--<span class="unit"> in</span>`);
+      const rrRaw = gv(rain, 'rain_rate', 4);
+      setText('rainRate', mmToIn(rrRaw) != null ? `${mmToIn(rrRaw)}/hr` : '--');
+      const rw = mmToIn(gv(rain, 'weekly', 4));
+      setText('rainWeekly', rw != null ? `${rw} in` : '--');
+
+      // Solar & UV
+      const sol = gv(d.solar_and_uvi, 'solar', 0);
+      setHTML('solar', sol != null ? `${sol}<span class="unit"> W/m²</span>` : '--');
+      const uvI = gv(d.solar_and_uvi, 'uvi', 0);
+      if (uvI != null) {
+        const uvEl = document.getElementById('uvi');
+        uvEl.textContent = uvI;
+        uvEl.style.color = uvColor(uvI);
+        document.getElementById('uvDot').style.left = `${Math.min(uvI / 12, 1) * 100}%`;
+      }
+
+      // Timestamp
+      const now = new Date();
+      setText('updatedAt', `Updated ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+      flashDot('#34c759');
+
+      document.getElementById('loadingOverlay').classList.add('gone');
+      document.getElementById('dashboard').classList.add('loaded');
+
+    } catch (err) {
+      console.error('Fetch error:', err);
+      setText('updatedAt', 'Fetch failed — retrying…');
+      flashDot('#ff453a');
+    }
+  }
+
+  // ── Soil temp (separate fetch) ───────────────────────────
+  async function fetchSoilTemp() {
+    const keysToTry = ['temp_ch1', 'temp_and_humidity_ch1'];
+    for (const key of keysToTry) {
+      try {
+        const params = new URLSearchParams({
+          application_key: APP_KEY,
+          api_key: API_KEY,
+          mac: MAC,
+          call_back: key,
+          temp_unitid: '2',
+        });
+        const res  = await fetch(`https://api.ecowitt.net/api/v3/device/real_time?${params}`);
+        const json = await res.json();
+        if (json.code !== 0) continue;
+        const soilT = gv(json.data[key], 'temperature');
+        if (soilT == null) continue;
+        setHTML('soilTemp', `${soilT}<span class="unit">°F</span>`);
+        const zone = soilZoneInfo(soilT);
+        const zoneEl = document.getElementById('soilZone');
+        zoneEl.textContent = zone.label;
+        zoneEl.style.color = zone.color;
+        document.getElementById('soilDot').style.left = `${Math.min(zone.pct, 100)}%`;
+        return;
+      } catch (e) { /* try next */ }
+    }
+  }
+
+  function flashDot(color) {
+    const dot = document.getElementById('pulseDot');
+    dot.style.background = color;
+    setTimeout(() => { dot.style.background = '#4a9eff'; }, 1500);
+  }
+
+  // ── Init ────────────────────────────────────────────────
+  fetchWeather();
+  fetchSoilTemp();
+  setInterval(fetchWeather, INTERVAL);
+  setInterval(fetchSoilTemp, INTERVAL);
+</script>
+</body>
+</html>
